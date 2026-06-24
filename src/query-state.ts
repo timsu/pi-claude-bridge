@@ -6,6 +6,7 @@
 //
 // Extracted from index.ts so tests can import without activating the extension.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { AssistantMessage, AssistantMessageEventStream, Model } from "@earendil-works/pi-ai";
 import type { McpResult } from "./extract-tool-results.js";
 
@@ -236,29 +237,69 @@ export class QueryContext {
 	}
 }
 
-let _ctx = new QueryContext();
-const contextStack: QueryContext[] = [];
+interface TurnStore {
+	ctx: QueryContext;
+	contextStack: QueryContext[];
+}
 
-export function ctx(): QueryContext { return _ctx; }
+// Per-turn AsyncLocalStorage so concurrent top-level turns each get their own
+// isolated QueryContext. Falls back to module-level singletons for code paths
+// (tests, non-concurrent Pi use) that don't call runWithFreshTurnContext.
+const turnStorage = new AsyncLocalStorage<TurnStore>();
+let _fallbackCtx = new QueryContext();
+const _fallbackStack: QueryContext[] = [];
 
-export function stackDepth(): number { return contextStack.length; }
+export function ctx(): QueryContext {
+	return turnStorage.getStore()?.ctx ?? _fallbackCtx;
+}
+
+export function stackDepth(): number {
+	return (turnStorage.getStore()?.contextStack ?? _fallbackStack).length;
+}
 
 export function pushContext(): void {
-	if (!_ctx.activeQuery) throw new Error("pushContext() called with no active query");
-	contextStack.push(_ctx);
-	_ctx = new QueryContext();
+	const store = turnStorage.getStore();
+	if (store) {
+		if (!store.ctx.activeQuery) throw new Error("pushContext() called with no active query");
+		store.contextStack.push(store.ctx);
+		store.ctx = new QueryContext();
+	} else {
+		if (!_fallbackCtx.activeQuery) throw new Error("pushContext() called with no active query");
+		_fallbackStack.push(_fallbackCtx);
+		_fallbackCtx = new QueryContext();
+	}
 }
 
 export function popContext(): void {
-	if (contextStack.length === 0) throw new Error("popContext() called with empty stack");
-	const parent = contextStack[contextStack.length - 1];
-	parent.deferredUserMessages.push(..._ctx.deferredUserMessages);
-	_ctx = contextStack.pop()!;
+	const store = turnStorage.getStore();
+	if (store) {
+		if (store.contextStack.length === 0) throw new Error("popContext() called with empty stack");
+		const parent = store.contextStack[store.contextStack.length - 1];
+		parent.deferredUserMessages.push(...store.ctx.deferredUserMessages);
+		store.ctx = store.contextStack.pop()!;
+	} else {
+		if (_fallbackStack.length === 0) throw new Error("popContext() called with empty stack");
+		const parent = _fallbackStack[_fallbackStack.length - 1];
+		parent.deferredUserMessages.push(..._fallbackCtx.deferredUserMessages);
+		_fallbackCtx = _fallbackStack.pop()!;
+	}
 }
 
-// Test-only: drop all state so test files can start from a clean module.
-// Not called from production.
+// Runs fn inside a fresh per-turn AsyncLocalStorage slot so concurrent top-level
+// turns don't share QueryContext state. Call this at every fresh streamSimple
+// entry point (i.e., non-reentrant calls to streamClaudeAgentSdk).
+export function runWithFreshTurnContext<T>(fn: () => T): T {
+	return turnStorage.run({ ctx: new QueryContext(), contextStack: [] }, fn);
+}
+
+// Returns true when the current call chain is already inside a runWithFreshTurnContext
+// slot. Use to guard against double-wrapping.
+export function isInTurnContext(): boolean {
+	return turnStorage.getStore() !== undefined;
+}
+
+// Test-only: drop fallback state so test files can start from a clean module.
 export function resetStack(): void {
-	_ctx = new QueryContext();
-	contextStack.length = 0;
+	_fallbackCtx = new QueryContext();
+	_fallbackStack.length = 0;
 }

@@ -15,7 +15,7 @@ import { FABLE_FALLBACK_MODEL_ID, FABLE_MODEL_ID, buildModels, fallbackModelForP
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX, extractSkillsBlock } from "./skills.js";
 import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.js";
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
-import { QueryContext, ctx, stackDepth, pushContext, popContext } from "./query-state.js";
+import { QueryContext, ctx, stackDepth, pushContext, popContext, runWithFreshTurnContext, isInTurnContext } from "./query-state.js";
 import { findUnpairedToolUses, summarizeMissingToolNames, type MissingToolResult } from "./tool-pairing-audit.js";
 import { loadConfig, normalizeEffortLevel, recordProjectTrust, type Config } from "./config.js";
 import { extractAgentsAppend } from "./agents-md.js";
@@ -1763,6 +1763,13 @@ async function consumeQuery(
 /** Provider entry point. Pi calls this for each new prompt and each tool result.
  *  Two cases: tool result delivery (active query) or fresh query. */
 function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+	// Concurrent-task isolation: each top-level turn runs in its own
+	// AsyncLocalStorage slot so concurrent tasks don't share _ctx/contextStack.
+	// Reentrant subagent calls are already inside a slot and skip this.
+	if (!isInTurnContext()) {
+		return runWithFreshTurnContext(() => streamClaudeAgentSdk(model, context, options));
+	}
+
 	const stream = newAssistantMessageEventStream();
 
 	// DEBUG: trace followUp message triggering

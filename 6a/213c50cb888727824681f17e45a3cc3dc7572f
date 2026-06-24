@@ -1,0 +1,27 @@
+README.md
+  s_aa51b71845490c::t_db74334f845644 5-80
+package.json
+  s_aa51b71845490c::t_fc1820a7107a45 180,182,184,186
+  s_aa51b71845490c::t_a970f8e8d4b956 2-4
+  s_aa51b71845490c::t_ac39ac0feb3b4e 1,5-179,181,183,185,187-201
+src/index.ts
+  s_aa51b71845490c::t_0f1433e8b01815 18
+src/query-state.ts
+  s_aa51b71845490c::t_b5f561fd19d4ff 239-263
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.13",
+  "base_commit_sha": "6a213c50cb888727824681f17e45a3cc3dc7572f",
+  "prompts": {},
+  "sessions": {
+    "s_aa51b71845490c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "126e03a0-e04c-4b3d-95eb-be2ca860d2d4",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Tim Su <timsu@users.noreply.github.com>"
+    }
+  }
+}

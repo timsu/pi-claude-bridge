@@ -37900,22 +37900,22 @@ function reportSyntheticToolResultRepair(missing, context) {
     debug("reportSyntheticToolResultRepair failed:", error51);
   }
 }
-function reportToolResultMismatch(queryCtx, reason, cwd, opts = {}) {
+function reportToolResultMismatch(queryCtx, reason, storeKey, opts = {}) {
   try {
     if (queryCtx.reportedToolResultMismatch) return false;
     const progress = queryCtx.toolResultProgress();
     const hasMismatch = progress.expectedCount > 0 ? progress.unresolvedIds.length > 0 || progress.waitingCount > 0 || progress.queuedCount > 0 || progress.unmatchedResultCount > 0 : progress.waitingCount > 0 || progress.queuedCount > 0 || progress.unmatchedResultCount > 0;
     if (!hasMismatch) return false;
     queryCtx.reportedToolResultMismatch = true;
-    const existing = getSharedSession(cwd);
+    const existing = getSharedSession(storeKey);
     if (existing) {
-      setSharedSession(cwd, { ...existing, needsRebuild: true, ...opts.forceRotate ? { forceRotate: true } : {} });
+      setSharedSession(storeKey, { ...existing, needsRebuild: true, ...opts.forceRotate ? { forceRotate: true } : {} });
     }
-    const marked = getSharedSession(cwd);
+    const marked = getSharedSession(storeKey);
     const toolNameSummary = compactToolNameSummary(progress.toolNames);
     diagDump("tool_result_delivery_mismatch", {
       reason,
-      cwd,
+      storeKey,
       progress,
       activeQueryExists: queryCtx.activeQuery !== null,
       sharedSession: marked ? {
@@ -38004,18 +38004,22 @@ var CLAUDE_BRIDGE_TOOL_ISOLATION = {
   allowedTools: [`mcp__${MCP_SERVER_NAME}__*`]
 };
 var sharedSessions = /* @__PURE__ */ new Map();
-function sessionStoreKey(cwd) {
-  return canonicalize(cwd) ?? cwd;
+function sessionStoreKey(key) {
+  if (!key.startsWith("/")) return key;
+  return canonicalize(key) ?? key;
 }
-function getSharedSession(cwd) {
-  if (!cwd) return null;
-  return sharedSessions.get(sessionStoreKey(cwd)) ?? null;
+function sharedSessionKeyFor(sessionId, cwd) {
+  return sessionId ?? cwd;
 }
-function setSharedSession(cwd, state) {
-  if (!cwd) return;
-  const key = sessionStoreKey(cwd);
-  if (state) sharedSessions.set(key, state);
-  else sharedSessions.delete(key);
+function getSharedSession(key) {
+  if (!key) return null;
+  return sharedSessions.get(sessionStoreKey(key)) ?? null;
+}
+function setSharedSession(key, state) {
+  if (!key) return;
+  const storeKey = sessionStoreKey(key);
+  if (state) sharedSessions.set(storeKey, state);
+  else sharedSessions.delete(storeKey);
 }
 function clearAllSharedSessions() {
   sharedSessions.clear();
@@ -38308,13 +38312,14 @@ function restoreSharedSessionFromPi(ctx2) {
     debug(`restoreSharedSession: Claude session missing for ${persisted.sessionId.slice(0, 8)}`);
     return;
   }
-  setSharedSession(persisted.cwd, { sessionId: persisted.sessionId, cursor, cwd: persisted.cwd });
+  setSharedSession(sharedSessionKeyFor(currentPiSessionId, currentCwd), { sessionId: persisted.sessionId, cursor, cwd: persisted.cwd });
   debug(`restoreSharedSession: restored ${persisted.sessionId.slice(0, 8)}, cursor=${cursor}`);
 }
 function schedulePersistSharedSession(ctxLike) {
   if (!extensionApi || !ctxLike?.sessionManager) return;
   const cwd = typeof ctxLike.sessionManager?.getCwd === "function" ? ctxLike.sessionManager.getCwd() : ctxLike.cwd;
-  const current = getSharedSession(cwd);
+  const piSessionId = typeof ctxLike.sessionManager?.getSessionId === "function" ? ctxLike.sessionManager.getSessionId() : void 0;
+  const current = getSharedSession(sharedSessionKeyFor(piSessionId, cwd));
   if (!current) return;
   const snapshot = { ...current };
   const timer = setTimeout(() => {
@@ -38458,17 +38463,17 @@ function debugSessionPaths(label, cwd, jsonlPath) {
   debug(`${label}: fileExists=${fileExists}${fileSize != null ? ` size=${fileSize}` : ""}`);
   debug(`${label}: env.CLAUDE_CONFIG_DIR=${process.env.CLAUDE_CONFIG_DIR ?? "(unset)"} HOME=${process.env.HOME ?? "(unset)"}`);
 }
-function syncSharedSession(messages, cwd, customToolNameToSdk, modelId) {
+function syncSharedSession(messages, cwd, storeKey, customToolNameToSdk, modelId) {
   const priorMessages = messages.slice(0, -1);
-  const current = getSharedSession(cwd);
+  const current = getSharedSession(storeKey);
   if (current && !current.needsRebuild) {
     const missed = priorMessages.slice(current.cursor);
     const trailingAssistantOnly = missed.length === 1 && missed[0].role === "assistant";
     if (missed.length === 0 || trailingAssistantOnly) {
       if (trailingAssistantOnly) {
-        setSharedSession(cwd, { ...current, cursor: priorMessages.length, cwd });
+        setSharedSession(storeKey, { ...current, cursor: priorMessages.length, cwd });
       }
-      const reused = getSharedSession(cwd);
+      const reused = getSharedSession(storeKey);
       debug(`Case 3: ${trailingAssistantOnly ? "advanced cursor past trailing assistant, " : ""}resuming session ${reused.sessionId.slice(0, 8)}, cursor=${reused.cursor}`);
       debug(`syncResult: path=reuse sessionId=${reused.sessionId} cursor=${reused.cursor}`);
       return { sessionId: reused.sessionId };
@@ -38494,7 +38499,7 @@ function syncSharedSession(messages, cwd, customToolNameToSdk, modelId) {
   convertAndImportMessages(session, priorMessages, customToolNameToSdk, cwd);
   session.save();
   verifyWrittenSession2(session.jsonlPath, session.sessionId, session.messages.length, cwd);
-  setSharedSession(cwd, { sessionId: session.sessionId, cursor: priorMessages.length, cwd });
+  setSharedSession(storeKey, { sessionId: session.sessionId, cursor: priorMessages.length, cwd });
   if (previousSessionId === void 0) {
     debug(`Case 2: first turn with ${priorMessages.length} prior messages \u2192 session ${session.sessionId.slice(0, 8)}, ${session.messages.length} records`);
   } else if (preserveId) {
@@ -38982,6 +38987,7 @@ function streamClaudeAgentSdk(model, context, options) {
   const stream = newAssistantMessageEventStream();
   const lastMsgRole = context.messages[context.messages.length - 1]?.role;
   const cwd = options?.cwd ?? process.cwd();
+  const storeKey = sharedSessionKeyFor(options?.sessionId, cwd);
   debug(`provider: streamClaudeAgentSdk called, activeQuery=${!!ctx().activeQuery}, lastMsgRole=${lastMsgRole}, isReentrant=${ctx().activeQuery !== null}`);
   if (ctx().activeQuery) {
     const queryCtx = ctx();
@@ -39022,7 +39028,7 @@ function streamClaudeAgentSdk(model, context, options) {
       };
       for (const pending of queryCtx.pendingToolCalls.values()) pending.resolve(errorResult);
       queryCtx.pendingToolCalls.clear();
-      reportToolResultMismatch(queryCtx, "unmatched tool result", cwd);
+      reportToolResultMismatch(queryCtx, "unmatched tool result", storeKey);
     }
     if (queryCtx.pendingToolCalls.size > 0) {
       debug(`WARNING: ${queryCtx.pendingToolCalls.size} MCP handlers still waiting after delivering ${allResults.length} results`);
@@ -39036,8 +39042,8 @@ function streamClaudeAgentSdk(model, context, options) {
       }
     }
     {
-      const s2 = getSharedSession(cwd);
-      if (s2) setSharedSession(cwd, { ...s2, cursor: context.messages.length });
+      const s2 = getSharedSession(storeKey);
+      if (s2) setSharedSession(storeKey, { ...s2, cursor: context.messages.length });
     }
     queryCtx.latestCursor = Math.max(queryCtx.latestCursor, context.messages.length);
     return stream;
@@ -39046,8 +39052,8 @@ function streamClaudeAgentSdk(model, context, options) {
   if (lastMsg?.role === "toolResult") {
     debug(`provider: orphaned tool result after abort, emitting end_turn`);
     {
-      const s2 = getSharedSession(cwd);
-      if (s2) setSharedSession(cwd, { ...s2, cursor: context.messages.length });
+      const s2 = getSharedSession(storeKey);
+      if (s2) setSharedSession(storeKey, { ...s2, cursor: context.messages.length });
     }
     const c2 = ctx();
     queueMicrotask(() => {
@@ -39078,7 +39084,7 @@ function streamClaudeAgentSdk(model, context, options) {
       stackDepth: stackDepth(),
       activeQueryExists: ctx().activeQuery !== null,
       sharedSession: (() => {
-        const s2 = getSharedSession(cwd);
+        const s2 = getSharedSession(storeKey);
         return s2 ? { sessionId: s2.sessionId.slice(0, 8), cursor: s2.cursor } : null;
       })(),
       messageRoles: context.messages.map((m4, i) => `[${i}]${m4.role}`).join(" ")
@@ -39099,7 +39105,7 @@ function streamClaudeAgentSdk(model, context, options) {
   const strictMcpConfigEnabled = !appendSystemPrompt && providerSettings.strictMcpConfig !== false;
   const claudeExecutable = resolveClaudeExecutable(providerSettings.pathToClaudeCodeExecutable);
   const claudeExecutablePreflight = claudeExecutable ? preflightClaudeExecutable(claudeExecutable, cwd) : void 0;
-  const { sessionId: resumeSessionId } = syncSharedSession(context.messages, cwd, customToolNameToSdk, model.id);
+  const { sessionId: resumeSessionId } = syncSharedSession(context.messages, cwd, storeKey, customToolNameToSdk, model.id);
   const requestedEffort = options?.reasoning ? model.thinkingLevelMap?.[options.reasoning] ?? REASONING_TO_EFFORT[options.reasoning] : void 0;
   const effort = resolveConfiguredEffort(model.id, requestedEffort, providerSettings);
   const extraArgs = {};
@@ -39167,8 +39173,8 @@ function streamClaudeAgentSdk(model, context, options) {
       abortCtx.deferredUserMessages = [];
       abortCtx.handledTerminalError = true;
       {
-        const s2 = getSharedSession(cwd);
-        if (s2) setSharedSession(cwd, { ...s2, needsRebuild: true, forceRotate: true });
+        const s2 = getSharedSession(storeKey);
+        if (s2) setSharedSession(storeKey, { ...s2, needsRebuild: true, forceRotate: true });
       }
       const errorMessage = buildStreamIdleTimeoutErrorMessage(timeoutMs);
       debug("provider: stream idle timeout", `model=${model.id}`, `timeout=${timeoutMs}`, `idle=${idleMs}`);
@@ -39207,7 +39213,7 @@ function streamClaudeAgentSdk(model, context, options) {
   const onAbort = () => {
     wasAborted = true;
     abortCtx.deferredUserMessages = [];
-    reportToolResultMismatch(abortCtx, "abort", cwd, { forceRotate: true });
+    reportToolResultMismatch(abortCtx, "abort", storeKey, { forceRotate: true });
     for (const pending of abortCtx.pendingToolCalls.values()) {
       pending.resolve({ content: [{ type: "text", text: "Operation aborted" }] });
     }
@@ -39228,8 +39234,8 @@ function streamClaudeAgentSdk(model, context, options) {
     }
     if (wasAborted || options?.signal?.aborted) {
       {
-        const s2 = getSharedSession(cwd);
-        if (s2) setSharedSession(cwd, { ...s2, needsRebuild: true, forceRotate: true });
+        const s2 = getSharedSession(storeKey);
+        if (s2) setSharedSession(storeKey, { ...s2, needsRebuild: true, forceRotate: true });
       }
       ctx().deferredUserMessages = [];
       debug(`provider: abort detected, marked sharedSession needsRebuild + forceRotate`);
@@ -39242,11 +39248,11 @@ function streamClaudeAgentSdk(model, context, options) {
       ctx().currentPiStream = null;
       return;
     }
-    const sessionId = capturedSessionId ?? getSharedSession(cwd)?.sessionId;
+    const sessionId = capturedSessionId ?? getSharedSession(storeKey)?.sessionId;
     if (sessionId) {
-      const cursor = Math.max(context.messages.length, ctx().latestCursor, getSharedSession(cwd)?.cursor ?? 0);
+      const cursor = Math.max(context.messages.length, ctx().latestCursor, getSharedSession(storeKey)?.cursor ?? 0);
       debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
-      setSharedSession(cwd, { sessionId, cursor, cwd });
+      setSharedSession(storeKey, { sessionId, cursor, cwd });
     }
     try {
       while (ctx().deferredUserMessages.length > 0 && !isReentrant && !wasAborted) {
@@ -39254,7 +39260,7 @@ function streamClaudeAgentSdk(model, context, options) {
         debug(`provider: replaying deferred user message: ${steerPrompt.slice(0, 60)}`);
         ctx().resetTurnState(model);
         ctx().resetToolTracking();
-        const resumeId = getSharedSession(cwd)?.sessionId;
+        const resumeId = getSharedSession(storeKey)?.sessionId;
         if (!resumeId) {
           debug(`WARNING: no session to resume for deferred message, dropping`);
           break;
@@ -39265,9 +39271,9 @@ function streamClaudeAgentSdk(model, context, options) {
         debug(`provider: continuation query, model=${model.id}, resume=${resumeId.slice(0, 8)}, prompt=${steerPrompt.slice(0, 60)}`);
         try {
           const { capturedSessionId: contSid } = await consumeQuery(contQuery, customToolNameToPi, model, cwd, bridgeConfig, () => wasAborted);
-          const sid = contSid ?? getSharedSession(cwd)?.sessionId;
+          const sid = contSid ?? getSharedSession(storeKey)?.sessionId;
           if (sid) {
-            setSharedSession(cwd, { sessionId: sid, cursor: getSharedSession(cwd)?.cursor ?? 0, cwd });
+            setSharedSession(storeKey, { sessionId: sid, cursor: getSharedSession(storeKey)?.cursor ?? 0, cwd });
           }
         } catch (contError) {
           debug(`provider: continuation query error:`, contError);
@@ -39285,11 +39291,11 @@ function streamClaudeAgentSdk(model, context, options) {
     const suppressDuplicateError = ctx().handledTerminalError || streamIdleTimedOut;
     const openedExtraUsage = !suppressDuplicateError && isExtraUsageRequiredMessage(error51) && launchExtraUsageHelperIfAllowed(cwd, bridgeConfig, "query error");
     const aborting = wasAborted || options?.signal?.aborted;
-    const s2 = getSharedSession(cwd);
+    const s2 = getSharedSession(storeKey);
     if (aborting && s2) {
-      setSharedSession(cwd, { ...s2, needsRebuild: true, forceRotate: true });
+      setSharedSession(storeKey, { ...s2, needsRebuild: true, forceRotate: true });
     } else {
-      setSharedSession(cwd, null);
+      setSharedSession(storeKey, null);
     }
     ctx().deferredUserMessages = [];
     if (suppressDuplicateError) {
@@ -39308,7 +39314,7 @@ function streamClaudeAgentSdk(model, context, options) {
     activeStreamIdleWatchdogs.delete(abortCtx);
     if (options?.signal) options.signal.removeEventListener("abort", onAbort);
     if (ctx().activeQuery === sdkQuery) {
-      reportToolResultMismatch(ctx(), "query teardown", cwd, { forceRotate: wasAborted || options?.signal?.aborted || streamIdleTimedOut });
+      reportToolResultMismatch(ctx(), "query teardown", storeKey, { forceRotate: wasAborted || options?.signal?.aborted || streamIdleTimedOut });
       for (const pending of ctx().pendingToolCalls.values()) {
         pending.resolve({ content: [{ type: "text", text: "Query ended" }] });
       }
@@ -39468,6 +39474,7 @@ export {
   reportToolResultMismatch,
   resolveConfiguredEffort,
   restoreSharedSessionFromPi,
+  sharedSessionKeyFor,
   shouldRestorePersistedBridgeEntry,
   spawnClaudeCodeWithDiagnostics,
   streamIdleTimeoutMsFromEnv,
